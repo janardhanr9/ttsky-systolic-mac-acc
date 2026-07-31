@@ -12,6 +12,7 @@ the DUT clocks on. `reset_dut` leaves the DUT parked in the single IDLE cycle;
 one further falling edge puts us in LOAD_W cycle 0.
 """
 
+import os
 import random
 
 import cocotb
@@ -31,6 +32,12 @@ from reference_model import (
 
 # Encoding of the `state_t` typedef in systolic_controller.sv.
 STATE_NAMES = {0: "IDLE", 1: "LOAD_W", 2: "LOAD_B", 3: "COMPUTE", 4: "DRAIN"}
+
+# Gate-level runs (`make GATES=yes`) simulate the synthesised netlist, which has
+# no `state`, `accumulator` or `weight` signals to probe. The white-box tests
+# below are skipped there; the black-box tests use only top-level ports and run
+# against both RTL and gates.
+GL = os.environ.get("GATES", "") == "yes"
 
 
 def ctrl(dut):
@@ -157,7 +164,7 @@ async def test_reference_model_matches_datasheet(dut):
 # --------------------------------------------------------------------------
 
 
-@cocotb.test()
+@cocotb.test(skip=GL)
 async def test_fsm_state_durations(dut):
     """Each state must last exactly as long as the datasheet says."""
     await start_clock(dut)
@@ -186,7 +193,7 @@ async def test_fsm_state_durations(dut):
     )
 
 
-@cocotb.test()
+@cocotb.test(skip=GL)
 async def test_cycle_count_restarts_each_state(dut):
     """cycle_count must run 0..N-1 within each state, restarting on entry."""
     await start_clock(dut)
@@ -209,7 +216,7 @@ async def test_cycle_count_restarts_each_state(dut):
     assert not problems, "cycle_count is wrong per state:\n" + "\n".join(problems)
 
 
-@cocotb.test()
+@cocotb.test(skip=GL)
 async def test_reset_clears_all_pe_state(dut):
     """Reset must clear every PE register, including the pass-through pipeline.
 
@@ -250,7 +257,7 @@ async def test_reset_clears_all_pe_state(dut):
     )
 
 
-@cocotb.test()
+@cocotb.test(skip=GL)
 async def test_weight_and_bias_loading(dut):
     """Weights and biases must land in the right PE, including negatives."""
     await start_clock(dut)
