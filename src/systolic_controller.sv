@@ -66,7 +66,9 @@ always_comb begin
             end
         end
         DRAIN: begin
-            next_state = IDLE;
+            if (cycle_count == 4'd7) begin
+                next_state = IDLE;
+            end
         end
         default: next_state = IDLE;
     endcase
@@ -107,15 +109,14 @@ always_ff @(posedge clk or negedge rst_n) begin
         cycle_count <= 4'd0;
     end else begin
         state <= next_state;
-        
-        case (state)
-            LOAD_W, LOAD_B, COMPUTE: begin
-                cycle_count <= cycle_count + 4'd1;
-            end
-            default: begin
-                cycle_count <= 4'd0;
-            end
-        endcase
+
+        // Restart the counter on every state change so each state sees
+        // cycle_count 0..N-1. Incrementing per-state instead let each state
+        // inherit the previous state's final count.
+        if (next_state != state)
+            cycle_count <= 4'd0;
+        else
+            cycle_count <= cycle_count + 4'd1;
     end
 end
 

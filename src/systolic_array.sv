@@ -1,18 +1,18 @@
 module systolic_array(
-    input logic [3:0] data_in,
-    output logic [7:0] final_acc_out,
+    input logic signed [3:0] data_in,
+    output logic signed [7:0] final_acc_out,
     input logic clk,
     input logic rst_n,
-    input logic [3:0] weight_in,
-    input logic [3:0] bias_in,
+    input logic signed [3:0] weight_in,
+    input logic signed [3:0] bias_in,
     input logic [7:0] pe_acc_en,   
     input logic [7:0] pe_weight_en,
     input logic [7:0] pe_bias_en,    
     input logic [2:0] drain_sel
 );
 
-logic [3:0] data_chain [0:7];
-logic [7:0] acc_chain [0:7];
+logic signed [3:0] data_chain [0:7];
+logic signed [7:0] acc_chain [0:7];
 
 generate 
     genvar i;

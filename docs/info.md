@@ -51,7 +51,7 @@ The controller implements a 5-state FSM:
 - **LOAD_W**: Load weights (8 cycles, one per PE)
 - **LOAD_B**: Load biases (8 cycles, one per PE)
 - **COMPUTE**: MAC operations (15 cycles to fill pipeline and compute)
-- **DRAIN**: Output accumulated results (1+ cycles to read results)
+- **DRAIN**: Output accumulated results (8 cycles, one per PE)
 
 ### I/O Interface
 
@@ -65,14 +65,23 @@ The controller implements a 5-state FSM:
 
 ### Automated Testing
 
-The design includes a comprehensive cocotb test suite with 6 test cases:
+The design includes a cocotb test suite with 12 test cases. Every functional
+test asserts against a golden reference model (`test/reference_model.py`)
+written from this datasheet rather than from the RTL, so the model cannot
+silently encode implementation bugs.
 
-1. **FSM State Transitions**: Verifies the state machine progresses correctly through all states
-2. **Weight Loading**: Confirms weights are loaded into all 8 PEs
-3. **Bias Loading**: Confirms biases are loaded into all 8 PE accumulators
-4. **Signed Math Stress Test**: Tests signed arithmetic and corner cases (negative weights, overflow handling)
-5. **Simple Computation**: Validates MAC operations with known inputs/outputs
-6. **Full Cycle Test**: Tests multiple complete cycles of operation
+1. **Reference Model Self-Check**: Confirms the model reproduces the worked example below
+2. **FSM State Durations**: Asserts each state lasts exactly 1/8/8/15/8 cycles
+3. **Cycle Counter**: Asserts `cycle_count` runs 0..N-1 and restarts on every state entry
+4. **Reset Coverage**: Asserts reset clears every PE register, including the pass-through pipeline
+5. **Weight and Bias Loading**: Confirms values land in the right PE, including negatives
+6. **Datasheet Example**: Drives the worked example below end to end
+7. **Negative Weights**: Asserts signed products, not zero-extended ones
+8. **Negative Activations**: Signed activations against positive weights
+9. **Saturation**: Asserts both the +127 and -128 rails clamp rather than wrap
+10. **Drain Ordering**: Asserts DRAIN emits PE0..PE7 on eight consecutive cycles
+11. **Randomized**: Eight random weight/bias/activation vectors vs. the model
+12. **Back to Back**: Two consecutive passes, checking no state carries over
 
 Run the tests:
 ```bash
@@ -122,7 +131,8 @@ Note: Results exceeding ±127 will be saturated to the 8-bit signed range.
 ### Timing Constraints
 
 - Clock frequency: 50 MHz (20ns period)
-- Total cycle count per operation: 32 cycles (1 IDLE + 8 LOAD_W + 8 LOAD_B + 15 COMPUTE + 1 DRAIN minimum)
+- Total cycle count per operation: 40 cycles (1 IDLE + 8 LOAD_W + 8 LOAD_B + 15 COMPUTE + 8 DRAIN)
+- The FSM wraps straight back to IDLE, so passes can be run back to back
 - Deterministic latency: No stalls or variable timing
 
 ## External hardware
