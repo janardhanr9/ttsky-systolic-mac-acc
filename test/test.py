@@ -1,257 +1,397 @@
 # SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
+"""Cocotb suite for the 8-PE systolic MAC array.
+
+Every functional test compares the DUT against `reference_model.py`, which is
+written from the datasheet rather than from the RTL. Tests assert; they do not
+merely log.
+
+Clocking convention: all stimulus is driven on the falling edge and all
+sampling is done on the falling edge, so nothing races the rising edge that
+the DUT clocks on. `reset_dut` leaves the DUT parked in the single IDLE cycle;
+one further falling edge puts us in LOAD_W cycle 0.
+"""
+
+import random
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import ClockCycles, FallingEdge
+
+from reference_model import (
+    COMPUTE_CYCLES,
+    N_PE,
+    STATE_CYCLES,
+    STATE_ORDER,
+    explain,
+    from_u8,
+    systolic_reference,
+    to_u4,
+)
+
+# Encoding of the `state_t` typedef in systolic_controller.sv.
+STATE_NAMES = {0: "IDLE", 1: "LOAD_W", 2: "LOAD_B", 3: "COMPUTE", 4: "DRAIN"}
 
 
-@cocotb.test()
-async def test_systolic_fsm_states(dut):
-    """Test FSM state transitions"""
-    dut._log.info("Testing FSM State Transitions")
+def ctrl(dut):
+    return dut.user_project.controller
 
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
 
-    # Reset
-    dut._log.info("Reset")
+def pe(dut, i):
+    return ctrl(dut).sa_inst.pe_chain[i].pe_inst
+
+
+def resolvable(handle):
+    """True if the signal currently holds no X/Z bits."""
+    return "x" not in str(handle.value).lower() and "z" not in str(handle.value).lower()
+
+
+def read_signed8(handle):
+    """Signed value of an 8-bit signal, or None if it holds X/Z."""
+    if not resolvable(handle):
+        return None
+    return from_u8(int(handle.value))
+
+
+def read_signed4(handle):
+    if not resolvable(handle):
+        return None
+    raw = int(handle.value) & 0xF
+    return raw - 16 if raw & 0x8 else raw
+
+
+def fmt(values):
+    return "[" + ", ".join("X" if v is None else str(v) for v in values) + "]"
+
+
+async def start_clock(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="us").start())
+
+
+async def reset_dut(dut):
+    """Reset and leave the DUT parked in the IDLE cycle."""
     dut.ena.value = 1
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 5)
+    await FallingEdge(dut.clk)
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
-
-    # Check IDLE -> LOAD_W transition
-    dut._log.info("Checking IDLE -> LOAD_W")
-    await ClockCycles(dut.clk, 1)
-
-    # Should be in LOAD_W for 8 cycles (0-7)
-    dut._log.info("In LOAD_W state")
-    await ClockCycles(dut.clk, 8)
-
-    # Should transition to LOAD_B
-    dut._log.info("Should be in LOAD_B state")
-    await ClockCycles(dut.clk, 8)
-
-    # Should transition to COMPUTE
-    dut._log.info("Should be in COMPUTE state")
-    await ClockCycles(dut.clk, 15)
-
-    # Should transition to DRAIN
-    dut._log.info("Should be in DRAIN state")
-    await ClockCycles(dut.clk, 1)
-
-    dut._log.info("FSM Test Complete")
+    # We are now inside the IDLE cycle; the next rising edge enters LOAD_W.
 
 
-@cocotb.test()
-async def test_weight_loading(dut):
-    """Test weight loading into all 8 PEs"""
-    dut._log.info("Testing Weight Loading")
+async def run_pass(dut, weights, biases, activations):
+    """Drive one complete LOAD_W/LOAD_B/COMPUTE/DRAIN pass per the datasheet.
 
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
+    Returns the eight values observed on uo_out during DRAIN (None for any
+    cycle where the output held X/Z). Leaves the DUT positioned at LOAD_W
+    cycle 0 of the following pass, so passes can be chained.
+    """
+    await FallingEdge(dut.clk)  # IDLE -> LOAD_W cycle 0
 
-    # Reset
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
-
-    # Wait to enter LOAD_W state
-    await ClockCycles(dut.clk, 1)
-
-    # Load weights: W0=1, W1=2, W2=3, W3=4, W4=5, W5=6, W6=7, W7=1
-    weights = [1, 2, 3, 4, 5, 6, 7, 1]
-    for i, w in enumerate(weights):
-        dut.ui_in.value = w
-        dut._log.info(f"Loading weight {w} into PE{i}")
-        await ClockCycles(dut.clk, 1)
-
-    dut._log.info("Weight Loading Complete")
-
-
-@cocotb.test()
-async def test_bias_loading(dut):
-    """Test bias loading into all 8 PEs"""
-    dut._log.info("Testing Bias Loading")
-
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
-    # Reset
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
-
-    # Skip through LOAD_W state (8 cycles after IDLE transition)
-    await ClockCycles(dut.clk, 1)  # Enter LOAD_W
-    await ClockCycles(dut.clk, 8)  # Complete LOAD_W
-
-    # Now in LOAD_B state - load biases
-    biases = [10, 20, 30, 40, 50, 60, 70, 1]
-    for i, b in enumerate(biases):
-        dut.ui_in.value = b
-        dut._log.info(f"Loading bias {b} into PE{i}")
-        await ClockCycles(dut.clk, 1)
-
-    dut._log.info("Bias Loading Complete")
-
-@cocotb.test()
-async def test_signed_stress_corners(dut):
-    """Test signed math and maximum values to check for overflows"""
-    dut._log.info("Testing Signed Math and Corner Cases")
-
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
-    # Reset
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
-
-    # 1. LOAD WEIGHTS: Set all PEs to -1 (Two's complement: 255)
-    await ClockCycles(dut.clk, 1) # Enter LOAD_W
-    for _ in range(8):
-        dut.ui_in.value = 0xFF # -1 in signed 8-bit
-        await ClockCycles(dut.clk, 1)
-
-    # 2. LOAD BIASES: Set all PEs to 10
-    for _ in range(8):
-        dut.ui_in.value = 10
-        await ClockCycles(dut.clk, 1)
-
-    # 3. COMPUTE: Feed activations of 5
-    # Math: (5 * -1) + 10 = 5. Result should be 5 across the board.
-    for _ in range(15):
-        dut.ui_in.value = 5
-        await ClockCycles(dut.clk, 1)
-
-    # 4. DRAIN and Validate
-    dut._log.info("Draining Signed Results")
-    for i in range(8):
-        # Combine high and low bytes
-        raw_val = int(dut.uo_out.value) | (int(dut.uio_out.value) << 8)
-        
-        # Convert unsigned 16-bit to signed Python int
-        if raw_val & 0x8000:
-            signed_res = raw_val - 0x10000
-        else:
-            signed_res = raw_val
-            
-        dut._log.info(f"PE{i} signed result: {signed_res}")
-        # Note: PE results will vary based on how many inputs they processed
-        await ClockCycles(dut.clk, 1)
-
-    dut._log.info("Stress Test Complete")
-
-@cocotb.test()
-async def test_simple_computation(dut):
-    """Test simple MAC computation: (data * weight) + bias"""
-    dut._log.info("Testing Simple Computation")
-
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
-    # Reset
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
-
-    # Enter LOAD_W state
-    await ClockCycles(dut.clk, 1)
-
-    # Load weights: W0=2, W1=3, W2=4, W3=5, W4=6, W5=7, W6=1, W7=2
-    weights = [2, 3, 4, 5, 6, 7, 1, 2]
     for w in weights:
-        dut.ui_in.value = w
-        await ClockCycles(dut.clk, 1)
+        dut.ui_in.value = to_u4(w)
+        await FallingEdge(dut.clk)
 
-    # Load biases: B0=0, B1=0, ... (for simplicity)
-    biases = [0, 0, 0, 0, 0, 0, 0, 0]
     for b in biases:
-        dut.ui_in.value = b
-        await ClockCycles(dut.clk, 1)
+        dut.ui_in.value = to_u4(b)
+        await FallingEdge(dut.clk)
 
-    # Now in COMPUTE state - feed data
-    # Data sequence: [10, 20, 30, 40, 50, 60, 70, 1]
-    data_seq = [10, 20, 30, 40, 50, 60, 70, 1, 0, 0, 0, 0, 0, 0, 0]  # 15 cycles for COMPUTE
-    for i, d in enumerate(data_seq):
-        dut.ui_in.value = d
-        dut._log.info(f"Compute cycle {i}: feeding data={d}")
-        await ClockCycles(dut.clk, 1)
+    for a in activations:
+        dut.ui_in.value = to_u4(a)
+        await FallingEdge(dut.clk)
 
-    # Now in DRAIN state - read accumulated results
-    # PE0: 10*2 = 20
-    # PE1: (10*3) + (20*3) = 30 + 60 = 90
-    # PE2: (10*4) + (20*4) + (30*4) = 240
-    # PE3: (10*5) + (20*5) + (30*5) + (40*5) = 500
-    # PE4-7: similar calculations
-    
-    dut._log.info("Draining results")
-    for i in range(8):
-        result = int(dut.uo_out.value) | (int(dut.uio_out.value) << 8)
-        dut._log.info(f"PE{i} accumulated result: {result}")
-        await ClockCycles(dut.clk, 1)
+    # Now in DRAIN cycle 0.
+    results = []
+    for _ in range(N_PE):
+        results.append(read_signed8(dut.uo_out))
+        await FallingEdge(dut.clk)
 
-    dut._log.info("Computation Test Complete")
+    return results
+
+
+def assert_matches(dut, weights, biases, activations, actual, label):
+    expected = systolic_reference(weights, biases, activations)
+    if actual != expected:
+        mismatches = [
+            f"  PE{i}: expected {e}, got {'X/Z' if a is None else a}"
+            for i, (e, a) in enumerate(zip(expected, actual))
+            if e != a
+        ]
+        raise AssertionError(
+            f"{label}: drained accumulators do not match the reference model.\n"
+            f"  weights     = {weights}\n"
+            f"  biases      = {biases}\n"
+            f"  activations = {activations}\n"
+            f"  expected    = {expected}\n"
+            f"  actual      = {fmt(actual)}\n"
+            + "\n".join(mismatches)
+            + "\n\nReference trace:\n"
+            + explain(weights, biases, activations)
+        )
+    dut._log.info(f"{label}: {fmt(actual)} matches reference model")
+
+
+# --------------------------------------------------------------------------
+# Model self-check
+# --------------------------------------------------------------------------
 
 
 @cocotb.test()
-async def test_full_cycle(dut):
-    """Test complete cycle: Load -> Compute -> Drain -> Repeat"""
-    dut._log.info("Testing Full Cycle")
+async def test_reference_model_matches_datasheet(dut):
+    """The model must reproduce the worked example published in docs/info.md."""
+    weights = [2, 3, 4, 5, 6, 7, 1, 2]
+    biases = [0] * N_PE
+    activations = [7] * 8 + [0] * 7
+    datasheet = [112, 127, 127, 127, 127, 127, 56, 112]
 
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
+    got = systolic_reference(weights, biases, activations)
+    assert got == datasheet, (
+        "reference model disagrees with the datasheet's own worked example:\n"
+        f"  datasheet = {datasheet}\n  model     = {got}"
+    )
 
-    # Reset
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
+
+# --------------------------------------------------------------------------
+# FSM / control-path tests
+# --------------------------------------------------------------------------
+
+
+@cocotb.test()
+async def test_fsm_state_durations(dut):
+    """Each state must last exactly as long as the datasheet says."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    total = sum(STATE_CYCLES.values())
+    observed = []
+    for _ in range(total + 1):  # one extra to see the wrap back to IDLE
+        observed.append(STATE_NAMES.get(int(ctrl(dut).state.value), "??"))
+        await FallingEdge(dut.clk)
+
+    # Run-length encode the observed state sequence.
+    runs = []
+    for name in observed:
+        if runs and runs[-1][0] == name:
+            runs[-1][1] += 1
+        else:
+            runs.append([name, 1])
+
+    expected = [[s, STATE_CYCLES[s]] for s in STATE_ORDER] + [["IDLE", 1]]
+    assert runs == expected, (
+        "FSM state durations are wrong.\n"
+        f"  expected = {expected}\n"
+        f"  observed = {runs}\n"
+        f"  raw      = {observed}"
+    )
+
+
+@cocotb.test()
+async def test_cycle_count_restarts_each_state(dut):
+    """cycle_count must run 0..N-1 within each state, restarting on entry."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    seen = {}
+    total = sum(STATE_CYCLES.values())
+    for _ in range(total):
+        state = STATE_NAMES.get(int(ctrl(dut).state.value), "??")
+        seen.setdefault(state, []).append(int(ctrl(dut).cycle_count.value))
+        await FallingEdge(dut.clk)
+
+    problems = []
+    for state in STATE_ORDER:
+        want = list(range(STATE_CYCLES[state]))
+        got = seen.get(state, [])
+        if got != want:
+            problems.append(f"  {state}: expected {want}, got {got}")
+
+    assert not problems, "cycle_count is wrong per state:\n" + "\n".join(problems)
+
+
+@cocotb.test()
+async def test_reset_clears_all_pe_state(dut):
+    """Reset must clear every PE register, including the pass-through pipeline.
+
+    Checking "is it X after reset" would only bite on a cold simulation -- once
+    earlier tests have clocked the design, an unreset register holds stale data
+    rather than X. So push known non-zero data through the chain first, then
+    reset, and require everything to come back to zero. That catches both the
+    cold-start X and the stale-data case, regardless of test ordering.
+    """
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    # Fill the chain with a known non-zero pattern.
+    await FallingEdge(dut.clk)
+    for _ in range(20):
+        dut.ui_in.value = 0xF
+        await FallingEdge(dut.clk)
+
+    # Now reset and check the whole PE state is back to a known zero.
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 5)
-    dut.rst_n.value = 1
+    await ClockCycles(dut.clk, 3)
+    await FallingEdge(dut.clk)
 
-    # Run through 2 complete cycles
-    for cycle in range(2):
-        dut._log.info(f"=== Cycle {cycle} ===")
-        
-        # IDLE -> LOAD_W
-        await ClockCycles(dut.clk, 1)
-        
-        # Load weights
-        for i in range(8):
-            dut.ui_in.value = (cycle + 1) * (i + 1)
-            await ClockCycles(dut.clk, 1)
-        
-        # Load biases
-        for i in range(8):
-            dut.ui_in.value = i * 5
-            await ClockCycles(dut.clk, 1)
-        
-        # Compute phase
-        for i in range(15):
-            dut.ui_in.value = i * 10
-            await ClockCycles(dut.clk, 1)
-        
-        # Drain phase
-        await ClockCycles(dut.clk, 1)
+    problems = []
+    for i in range(N_PE):
+        for name in ("accumulator", "weight", "pass_through_data"):
+            handle = getattr(pe(dut, i), name)
+            if not resolvable(handle):
+                problems.append(f"  PE{i}.{name} = {handle.value} (X/Z after reset)")
+            elif int(handle.value) != 0:
+                problems.append(
+                    f"  PE{i}.{name} = {int(handle.value)} "
+                    "(not cleared -- missing from the reset branch?)"
+                )
 
-    dut._log.info("Full Cycle Test Complete")
+    assert not problems, (
+        "reset did not clear all PE state:\n" + "\n".join(problems)
+    )
+
+
+@cocotb.test()
+async def test_weight_and_bias_loading(dut):
+    """Weights and biases must land in the right PE, including negatives."""
+    await start_clock(dut)
+    await reset_dut(dut)
+    await FallingEdge(dut.clk)  # LOAD_W cycle 0
+
+    weights = [1, -2, 3, -4, 5, -6, 7, -8]
+    for w in weights:
+        dut.ui_in.value = to_u4(w)
+        await FallingEdge(dut.clk)
+
+    got_w = [read_signed4(pe(dut, i).weight) for i in range(N_PE)]
+    assert got_w == weights, (
+        f"weights mis-loaded: expected {weights}, got {fmt(got_w)}"
+    )
+
+    biases = [0, 7, -8, 3, -1, 6, -5, 2]
+    for b in biases:
+        dut.ui_in.value = to_u4(b)
+        await FallingEdge(dut.clk)
+
+    got_b = [read_signed8(pe(dut, i).accumulator) for i in range(N_PE)]
+    assert got_b == biases, (
+        "biases mis-loaded (or not sign-extended into the accumulator): "
+        f"expected {biases}, got {fmt(got_b)}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Datapath tests -- all assert against the reference model
+# --------------------------------------------------------------------------
+
+
+@cocotb.test()
+async def test_mac_datasheet_example(dut):
+    """The datasheet's worked example, end to end through the DUT."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    weights = [2, 3, 4, 5, 6, 7, 1, 2]
+    biases = [0] * N_PE
+    activations = [7] * 8 + [0] * 7
+
+    actual = await run_pass(dut, weights, biases, activations)
+    assert_matches(dut, weights, biases, activations, actual, "datasheet example")
+
+
+@cocotb.test()
+async def test_mac_signed_negative_weights(dut):
+    """Negative weights must produce negative products, not zero-extended ones."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    weights = [-1] * N_PE
+    biases = [5] * N_PE
+    activations = [5] * 8 + [0] * 7
+
+    actual = await run_pass(dut, weights, biases, activations)
+    assert_matches(dut, weights, biases, activations, actual, "negative weights")
+
+
+@cocotb.test()
+async def test_mac_signed_negative_activations(dut):
+    """Negative activations, positive weights."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    weights = [1, 2, 3, 4, 5, 6, 7, 1]
+    biases = [-8, -4, 0, 4, 7, 0, -2, 1]
+    activations = [-3] * 8 + [0] * 7
+
+    actual = await run_pass(dut, weights, biases, activations)
+    assert_matches(dut, weights, biases, activations, actual, "negative activations")
+
+
+@cocotb.test()
+async def test_mac_saturation_both_rails(dut):
+    """Positive and negative saturation must clamp, not wrap."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    # PE0..3 drive hard positive, PE4..7 drive hard negative.
+    weights = [7, 7, 7, 7, -8, -8, -8, -8]
+    biases = [7, 7, 7, 7, -8, -8, -8, -8]
+    activations = [7] * 8 + [0] * 7
+
+    actual = await run_pass(dut, weights, biases, activations)
+    assert_matches(dut, weights, biases, activations, actual, "saturation")
+
+    expected = systolic_reference(weights, biases, activations)
+    assert expected[:4] == [127] * 4 and expected[4:] == [-128] * 4, (
+        f"test vector no longer exercises both rails: {expected}"
+    )
+
+
+@cocotb.test()
+async def test_drain_emits_all_eight_pes_in_order(dut):
+    """DRAIN must present PE0..PE7 on eight consecutive cycles."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    weights = [1, 2, 3, -1, -2, -3, 4, -4]
+    biases = [0, 1, 2, 3, -1, -2, -3, 0]
+    activations = [1] * 8 + [0] * 7
+
+    expected = systolic_reference(weights, biases, activations)
+    assert len(set(expected)) == N_PE, (
+        f"vector must give every PE a distinct value to prove ordering: {expected}"
+    )
+
+    actual = await run_pass(dut, weights, biases, activations)
+    assert_matches(dut, weights, biases, activations, actual, "drain ordering")
+
+
+@cocotb.test()
+async def test_mac_randomized(dut):
+    """Randomized vectors, checked against the model. Fixed seed for repeatability."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    rng = random.Random(0xC0FFEE)
+    for trial in range(8):
+        weights = [rng.randint(-8, 7) for _ in range(N_PE)]
+        biases = [rng.randint(-8, 7) for _ in range(N_PE)]
+        activations = [rng.randint(-8, 7) for _ in range(COMPUTE_CYCLES)]
+
+        actual = await run_pass(dut, weights, biases, activations)
+        assert_matches(dut, weights, biases, activations, actual, f"random trial {trial}")
+
+
+@cocotb.test()
+async def test_back_to_back_passes(dut):
+    """Two full passes in a row must both be correct -- no state carried over."""
+    await start_clock(dut)
+    await reset_dut(dut)
+
+    vectors = [
+        ([2, 3, 4, 5, 6, 7, 1, 2], [0] * N_PE, [3] * 8 + [0] * 7),
+        ([-1, 1, -2, 2, -3, 3, -4, 4], [1, -1, 2, -2, 3, -3, 4, -4], [2] * 8 + [0] * 7),
+    ]
+
+    for n, (weights, biases, activations) in enumerate(vectors):
+        actual = await run_pass(dut, weights, biases, activations)
+        assert_matches(dut, weights, biases, activations, actual, f"pass {n}")

@@ -12,4 +12,4 @@ test/__pycache__/
 test/results.xml
 test/gate_level_netlist.v
 venv
-.github/
+.github/.venv
