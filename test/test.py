@@ -35,7 +35,11 @@ DRAIN_CYCLES = 8
 IDLE_CYCLES = 1
 
 CLOCK_PERIOD_US = 10
-SETTLE_NS = 1  # let the combinational drain mux settle after a clock edge
+# Sample outputs mid-cycle rather than right after the clock edge. uo_out is
+# driven by a combinational mux, and in gate-level simulation it needs time to
+# settle through real gate delays -- sampling too early reads the previous
+# cycle's PE and silently shifts every drained result by one.
+SAMPLE_DELAY_US = CLOCK_PERIOD_US / 2
 
 ACC_MIN, ACC_MAX = -128, 127
 OPERAND_MIN, OPERAND_MAX = -8, 7
@@ -86,13 +90,13 @@ class SystolicArray:
         self.dut.rst_n.value = 0
         await ClockCycles(self.dut.clk, 5)
         self.dut.rst_n.value = 1
-        await Timer(SETTLE_NS, "ns")
+        await Timer(SAMPLE_DELAY_US, "us")
 
     async def _step(self, value=0):
         """Advance one cycle, presenting `value` for that cycle's capture."""
         await RisingEdge(self.dut.clk)
         self.dut.ui_in.value = to_nibble(value)
-        await Timer(SETTLE_NS, "ns")
+        await Timer(SAMPLE_DELAY_US, "us")
 
     async def run_pass(self, weights, biases, activations):
         """Drive a full LOAD_W -> LOAD_B -> COMPUTE -> DRAIN pass.
