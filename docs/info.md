@@ -51,7 +51,7 @@ The controller implements a 5-state FSM:
 - **LOAD_W**: Load weights (8 cycles, one per PE)
 - **LOAD_B**: Load biases (8 cycles, one per PE)
 - **COMPUTE**: MAC operations (15 cycles to fill pipeline and compute)
-- **DRAIN**: Output accumulated results (1+ cycles to read results)
+- **DRAIN**: Output accumulated results (8 cycles, one per PE), then return to IDLE
 
 ### I/O Interface
 
@@ -59,20 +59,26 @@ The controller implements a 5-state FSM:
 - **ui_in[7:4]**: Unused
 - **uo_out[7:0]**: 8-bit signed result during DRAIN
 - **uio_out[7:0]**: Unused (all zeros)
-- **uio_oe[7:0]**: Bidirectional enable (always output = 0xFF)
+- **uio_oe[7:0]**: Bidirectional enable (always 0x00 - the uio pins are unused and stay inputs)
 
 ## How to test
 
 ### Automated Testing
 
-The design includes a comprehensive cocotb test suite with 6 test cases:
+The design includes a cocotb test suite of 9 self-checking test cases. Every test
+compares the drained results against an independent Python reference model, and the
+suite is black-box (it only drives the chip pins), so it runs unmodified against both
+the RTL and the gate-level netlist:
 
-1. **FSM State Transitions**: Verifies the state machine progresses correctly through all states
-2. **Weight Loading**: Confirms weights are loaded into all 8 PEs
-3. **Bias Loading**: Confirms biases are loaded into all 8 PE accumulators
-4. **Signed Math Stress Test**: Tests signed arithmetic and corner cases (negative weights, overflow handling)
-5. **Simple Computation**: Validates MAC operations with known inputs/outputs
-6. **Full Cycle Test**: Tests multiple complete cycles of operation
+1. **Reset**: Accumulators clear and the unused uio pins stay parked as inputs
+2. **Weight Loading**: Each weight lands in its own PE, and DRAIN reads the PEs back in order
+3. **Bias Loading**: Each bias lands in its own PE accumulator
+4. **MAC Computation**: Multiply-accumulate against hand-computed results
+5. **Signed Arithmetic**: Negative weights, activations and biases all propagate correctly
+6. **Accumulator Saturation**: The accumulator clamps at +127/-128 instead of wrapping
+7. **Datasheet Example**: The worked example below is verified against the hardware
+8. **Back-to-Back Passes**: The FSM returns to IDLE and reloads cleanly for the next pass
+9. **Randomized Passes**: 25 random passes checked against the reference model
 
 Run the tests:
 ```bash
@@ -122,7 +128,7 @@ Note: Results exceeding ±127 will be saturated to the 8-bit signed range.
 ### Timing Constraints
 
 - Clock frequency: 50 MHz (20ns period)
-- Total cycle count per operation: 32 cycles (1 IDLE + 8 LOAD_W + 8 LOAD_B + 15 COMPUTE + 1 DRAIN minimum)
+- Total cycle count per operation: 40 cycles (1 IDLE + 8 LOAD_W + 8 LOAD_B + 15 COMPUTE + 8 DRAIN)
 - Deterministic latency: No stalls or variable timing
 
 ## External hardware

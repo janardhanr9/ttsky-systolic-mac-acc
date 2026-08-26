@@ -33,7 +33,10 @@ module systolic_pe (
             end
             if (acc_w_en) begin
                 logic signed [8:0] mac_result;
-                mac_result = accumulator + (data_in * weight);
+                // $signed() is required: data_in is an unsigned port, and a
+                // single unsigned operand would make the whole expression
+                // unsigned and destroy the sign of the accumulator.
+                mac_result = accumulator + ($signed(data_in) * weight);
                 // Saturate to 8-bit range
                 if (mac_result > 9'sd127)
                     accumulator <= 8'sd127;
